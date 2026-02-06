@@ -11,6 +11,7 @@ from ..schema import LLMProvider, LLMResponse, Message
 from .anthropic_client import AnthropicClient
 from .base import LLMClientBase
 from .openai_client import OpenAIClient
+from .gemini_client import GeminiClient
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +95,12 @@ class LLMClient:
                 api_base=full_api_base,
                 model=model,
                 retry_config=retry_config,
+            )
+        elif provider == LLMProvider.GOOGLE:
+            self._client = GeminiClient(
+                api_key=api_key,
+                model=model,
+                retry_config=retry_config
             )
         else:
             raise ValueError(f"Unsupported provider: {provider}")

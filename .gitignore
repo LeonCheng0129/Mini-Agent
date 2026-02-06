@@ -36,6 +36,7 @@ env/
 # Workspace
 workspace/
 *.log
+.logs/
 
 # OS
 .DS_Store
@@ -43,6 +44,7 @@ Thumbs.db
 
 # Config (contains API keys)
 config.yaml
+config_gemini.yaml
 
 # test file
 demo.py
