@@ -22,7 +22,7 @@ class FunctionCall(BaseModel):
 class ToolCall(BaseModel):
     """Tool call structure."""
 
-    id: str     # thought_signature in Google Gemini
+    id: str
     type: str   # "function"
     function: FunctionCall
 
