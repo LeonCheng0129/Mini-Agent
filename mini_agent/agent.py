@@ -400,6 +400,7 @@ Requirements:
                 content=response.content,
                 thinking=response.thinking,
                 tool_calls=response.tool_calls,
+                thought_signature=response.thought_signature if response.tool_calls is not None else None
             )
             self.messages.append(assistant_msg)
 

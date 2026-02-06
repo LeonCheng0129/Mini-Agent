@@ -9,6 +9,7 @@ class LLMProvider(str, Enum):
 
     ANTHROPIC = "anthropic"
     OPENAI = "openai"
+    GOOGLE = "google"
 
 
 class FunctionCall(BaseModel):
@@ -22,7 +23,7 @@ class ToolCall(BaseModel):
     """Tool call structure."""
 
     id: str
-    type: str  # "function"
+    type: str   # "function"
     function: FunctionCall
 
 
@@ -35,6 +36,7 @@ class Message(BaseModel):
     tool_calls: list[ToolCall] | None = None
     tool_call_id: str | None = None
     name: str | None = None  # For tool role
+    thought_signature: bytes | None = None # Only used when provider is Google Gemini
 
 
 class TokenUsage(BaseModel):
@@ -53,3 +55,4 @@ class LLMResponse(BaseModel):
     tool_calls: list[ToolCall] | None = None
     finish_reason: str
     usage: TokenUsage | None = None  # Token usage from API response
+    thought_signature: bytes | None = None # Only used when provider is Google Gemini

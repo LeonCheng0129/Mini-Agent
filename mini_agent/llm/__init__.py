@@ -4,6 +4,7 @@ from .anthropic_client import AnthropicClient
 from .base import LLMClientBase
 from .llm_wrapper import LLMClient
 from .openai_client import OpenAIClient
+from .gemini_client import GeminiClient
 
-__all__ = ["LLMClientBase", "AnthropicClient", "OpenAIClient", "LLMClient"]
+__all__ = ["LLMClientBase", "AnthropicClient", "OpenAIClient", "GeminiClient", "LLMClient"]
 

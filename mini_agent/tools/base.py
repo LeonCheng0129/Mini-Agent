@@ -4,6 +4,8 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from google.genai import types
+
 
 class ToolResult(BaseModel):
     """Tool execution result."""
@@ -53,3 +55,11 @@ class Tool:
                 "parameters": self.parameters,
             },
         }
+    
+    def to_google_schema(self) -> types.FunctionDeclaration:
+        """Convert tool to Google tool schema."""
+        return types.FunctionDeclaration(
+            name=self.name,
+            description=self.description,
+            parameters=self.parameters,
+        )

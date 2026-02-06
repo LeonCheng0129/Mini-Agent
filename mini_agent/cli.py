@@ -528,8 +528,13 @@ async def run_agent(workspace_dir: Path):
         print(f"{Colors.DIM}   Retrying in {next_delay:.1f}s (attempt {attempt + 1})...{Colors.RESET}")
 
     # Convert provider string to LLMProvider enum
-    provider = LLMProvider.ANTHROPIC if config.llm.provider.lower() == "anthropic" else LLMProvider.OPENAI
-
+    provider_map = {
+        "anthropic": LLMProvider.ANTHROPIC,
+        "openai": LLMProvider.OPENAI,
+        "google": LLMProvider.GOOGLE,
+    }
+    provider = provider_map.get(config.llm.provider.lower(), LLMProvider.OPENAI)
+    
     llm_client = LLMClient(
         api_key=config.llm.api_key,
         provider=provider,
@@ -832,3 +837,130 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+async def run_agent_pseudo_code(workspace_dir: Path):
+    """Run interactive Agent
+
+    Args:
+        workspace_dir: Workspace directory path
+    """
+    session_start = datetime.now()
+
+    # 1. Load Configuration from package directory
+    config_path = Config.get_default_config_path()
+
+    if not config_path.exists():
+        # print some debug info here
+        return
+    
+    ## Try to load config
+    try:
+        config = Config.from_yaml(config_path)
+    ### Catch two common error type
+    except FileNotFoundError:
+        # Print ...
+        return
+    except ValueError:
+        # Print ...
+        return
+    ### Catch all error
+    except Exception as e:
+        # Print ...
+        return
+    
+    # 2. Initialize LLM client
+    from mini_agent.retry import RetryConfig as RetryConfigBase
+
+    # Convert configuration format
+    retry_config = RetryConfigBase(
+        enabled=config.llm.retry.enabled,
+        max_retries=config.llm.retry.max_retries,
+        initial_delay=config.llm.retry.initial_delay,
+        max_delay=config.llm.retry.max_delay,
+        exponential_base=config.llm.retry.exponential_base,
+        retryable_exceptions=(Exception,),
+    )
+
+    # Create a retry call back to display retry information in terminal
+    def on_retry(exception: Exception, attempt: int):
+        pass
+
+    # get provider infor from config
+    provider_map = {
+        "anthropic": LLMProvider.ANTHROPIC,
+        "openai": LLMProvider.OPENAI,
+        "google": LLMProvider.GOOGLE,
+    }
+    provider = provider_map.get(config.llm.provider.lower, LLMProvider.OPENAI)
+
+    llm_client = LLMClient(
+        api_key=config.llm.api_key,
+        provider=provider,
+        api_base=config.llm.api_base,
+        model=config.llm.model,
+        retry_config=retry_config if config.llm.retry.enabled else None,
+    )
+
+    # Set retry callback
+    if config.llm.retry.enabled:
+        llm_client.retry_callback = on_retry
+
+    # 3. Initialize base tools (independent of workspace)
+    tools, skill_loader = await initialize_base_tools(config)
+
+    # 4. Add workspace-dependent tools
+    add_workspace_tools(tools, config, workspace_dir)
+
+    # 5. Load System Prompt (With priority search)
+    system_prompt_path = Config.find_config_file(config.agent.system_prompt_path)
+    if system_prompt_path and system_prompt_path.exists:
+        system_prompt = system_prompt_path.read_text(encoding="utf-8")
+    else:
+        system_prompt = "You're Mini-Agent, an intelligent assistant that can help user complete various tasks."
+    
+    # 6. Inject Skills Metadata into system prompt (Progressive Disclosure - Level 1)
+    if skill_loader:
+        skills_metadata = skill_loader.get_skills_metadata_prompt()
+        if skills_metadata:
+            system_prompt = system_prompt.replace("{SKILLS_METADATA}", skills_metadata)
+        else:
+            system_prompt = system_prompt.replace("{SKILLS_METADATA}", "")
+    else:
+        system_prompt = system_prompt.replace("{SKILLS_METADATA}", "")
+
+    # 7. Create Agent
+    agent = Agent(
+        llm_client=llm_client,
+        system_prompt=system_prompt,
+        tools=tools,
+        max_steps=config.agent.max_steps,
+        workspace_dir=str(workspace_dir),
+    )
+
+    # 8 and 9. Some helpful user friendly set-up and informations
+
+    # 10.Interactive loop
+    while True:
+        try:
+            # A mock session
+            session = PromptSession()
+            # Wait for user input
+            user_input = await session.prompt_async()
+
+            # handle command
+            if user_input.startswith("/"):
+                pass
+            # Normal conversation, run agent
+            agent.add_user_message(user_input)
+            _ = await agent.run()
+        except KeyboardInterrupt:
+            break
+        except Exception as e:
+            print(f'Error: {e}')
+    
+    # 11. Cleanup MCP connections
+    try:
+        await cleanup_mcp_connections()
+    except Exception as e:
+        print(f'Error: {e}')
