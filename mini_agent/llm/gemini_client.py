@@ -10,6 +10,7 @@ from google.genai import types
 from .base import LLMClientBase
 from ..retry import RetryConfig, async_retry
 from ..schema import FunctionCall, LLMResponse, Message, TokenUsage, ToolCall
+from ..utils import remove_schema_fields
 
 logger = logging.getLogger(__name__)
 
@@ -168,7 +169,7 @@ class GeminiClient(LLMClientBase):
                         types.FunctionDeclaration(
                                 name=function["name"],
                                 description=function["description"],
-                                parameters=function["parameters"],
+                                parameters=remove_schema_fields(function["parameters"]),
                         )
                     )
                 else:
@@ -177,7 +178,7 @@ class GeminiClient(LLMClientBase):
                         types.FunctionDeclaration(
                                 name=tool["name"],
                                 description=tool["description"],
-                                parameters=tool["input_schema"],
+                                parameters=remove_schema_fields(tool["input_schema"]),
                             )
                         )
             elif hasattr(tool, "to_google_schema"):
@@ -185,7 +186,10 @@ class GeminiClient(LLMClientBase):
             else:
                 raise TypeError(f"Unsupported tool type: {type(tool)}")
 
-        return [types.Tool(function_declarations=tool_list)] if len(tool_list) > 0 else []
+        if len(tool_list) <= 0:
+            return []
+        # TODO: Google search tool not mentioned in system prompt
+        return [types.Tool(function_declarations=tool_list, google_search=types.GoogleSearch())]
     
     def _parse_response(self, response: types.GenerateContentResponse) -> LLMResponse:
         """Parse Gemini response into LLMResponse.

@@ -6,6 +6,8 @@ from pydantic import BaseModel
 
 from google.genai import types
 
+from ..utils import remove_schema_fields
+
 
 class ToolResult(BaseModel):
     """Tool execution result."""
@@ -61,5 +63,5 @@ class Tool:
         return types.FunctionDeclaration(
             name=self.name,
             description=self.description,
-            parameters=self.parameters,
+            parameters=remove_schema_fields(self.parameters),
         )
