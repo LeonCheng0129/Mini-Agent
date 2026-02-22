@@ -7,6 +7,8 @@ from typing import Any
 
 from .schema import Message, ToolCall
 
+_DEFAULT_LOG_DIR = object()
+
 
 class AgentLogger:
     """Agent run logger
@@ -16,19 +18,34 @@ class AgentLogger:
     - Tool calls and results
     """
 
-    def __init__(self):
+    def __init__(self, log_dir: str | Path | None | object = _DEFAULT_LOG_DIR):
         """Initialize logger
 
         Logs are stored in ~/.mini-agent/log/ directory
         """
-        # Use ~/.mini-agent/log/ directory for logs
-        self.log_dir = Path.home() / ".mini-agent" / "log"
-        self.log_dir.mkdir(parents=True, exist_ok=True)
+        # Use ~/.mini-agent/log/ directory for logs unless overridden.
+        # When log_dir is None, logging remains disabled until set_log_dir() is called.
+        if log_dir is _DEFAULT_LOG_DIR:
+            self.log_dir = Path.home() / ".mini-agent" / "log"
+        elif log_dir is None:
+            self.log_dir = None
+        else:
+            self.log_dir = Path(log_dir)
         self.log_file = None
         self.log_index = 0
 
+    def set_log_dir(self, log_dir: str | Path | None) -> None:
+        """Set or clear log directory."""
+        self.log_dir = Path(log_dir) if log_dir is not None else None
+
     def start_new_run(self):
         """Start new run, create new log file"""
+        if self.log_dir is None:
+            self.log_file = None
+            self.log_index = 0
+            return
+
+        self.log_dir.mkdir(parents=True, exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         log_filename = f"agent_run_{timestamp}.log"
         self.log_file = self.log_dir / log_filename
