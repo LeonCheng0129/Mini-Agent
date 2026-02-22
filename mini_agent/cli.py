@@ -29,7 +29,9 @@ from prompt_toolkit.styles import Style
 from mini_agent import LLMClient
 from mini_agent.agent import Agent
 from mini_agent.config import Config
+from mini_agent.logger import AgentLogger
 from mini_agent.schema import LLMProvider
+from mini_agent.session_store import SessionMeta, SessionStore
 from mini_agent.tools.base import Tool
 from mini_agent.tools.bash_tool import BashKillTool, BashOutputTool, BashTool
 from mini_agent.tools.file_tools import EditTool, ReadTool, WriteTool
@@ -74,18 +76,18 @@ class Colors:
     BG_BLUE = "\033[44m"
 
 
-def get_log_directory() -> Path:
+def get_log_directory(log_dir: Path | None = None) -> Path:
     """Get the log directory path."""
-    return Path.home() / ".mini-agent" / "log"
+    return log_dir if log_dir is not None else Path.home() / ".mini-agent" / "log"
 
 
-def show_log_directory(open_file_manager: bool = True) -> None:
+def show_log_directory(log_dir: Path | None = None, open_file_manager: bool = True) -> None:
     """Show log directory contents and optionally open file manager.
 
     Args:
         open_file_manager: Whether to open the system file manager
     """
-    log_dir = get_log_directory()
+    log_dir = get_log_directory(log_dir)
 
     print(f"\n{Colors.BRIGHT_CYAN}📁 Log Directory: {log_dir}{Colors.RESET}")
 
@@ -141,13 +143,13 @@ def _open_directory_in_file_manager(directory: Path) -> None:
         print(f"{Colors.YELLOW}Error opening file manager: {e}{Colors.RESET}")
 
 
-def read_log_file(filename: str) -> None:
+def read_log_file(filename: str, log_dir: Path | None = None) -> None:
     """Read and display a specific log file.
 
     Args:
         filename: The log filename to read
     """
-    log_dir = get_log_directory()
+    log_dir = get_log_directory(log_dir)
     log_file = log_dir / filename
 
     if not log_file.exists() or not log_file.is_file():
@@ -192,6 +194,8 @@ def print_help():
     help_text = f"""
 {Colors.BOLD}{Colors.BRIGHT_YELLOW}Available Commands:{Colors.RESET}
   {Colors.BRIGHT_GREEN}/help{Colors.RESET}      - Show this help message
+  {Colors.BRIGHT_GREEN}/new{Colors.RESET}       - Start a new pending session (lazy, no files yet)
+  {Colors.BRIGHT_GREEN}/resume{Colors.RESET}    - Resume a materialized session from list
   {Colors.BRIGHT_GREEN}/clear{Colors.RESET}     - Clear session history (keep system prompt)
   {Colors.BRIGHT_GREEN}/history{Colors.RESET}   - Show current session message count
   {Colors.BRIGHT_GREEN}/stats{Colors.RESET}     - Show session statistics
@@ -212,14 +216,20 @@ def print_help():
 {Colors.BOLD}{Colors.BRIGHT_YELLOW}Usage:{Colors.RESET}
   - Enter your task directly, Agent will help you complete it
   - Agent remembers all conversation content in this session
-  - Use {Colors.BRIGHT_GREEN}/clear{Colors.RESET} to start a new session
+  - Use {Colors.BRIGHT_GREEN}/new{Colors.RESET} to switch to a new pending session
   - Press {Colors.BRIGHT_CYAN}Enter{Colors.RESET} to submit your message
   - Use {Colors.BRIGHT_CYAN}Ctrl+J{Colors.RESET} to insert line breaks within your message
 """
     print(help_text)
 
 
-def print_session_info(agent: Agent, workspace_dir: Path, model: str):
+def print_session_info(
+    agent: Agent,
+    workspace_dir: Path,
+    model: str,
+    session_id: str | None = None,
+    session_title: str | None = None,
+):
     """Print session information with proper alignment"""
     BOX_WIDTH = 58
 
@@ -247,6 +257,9 @@ def print_session_info(agent: Agent, workspace_dir: Path, model: str):
     # Info lines
     print_info_line(f"Model: {model}")
     print_info_line(f"Workspace: {workspace_dir}")
+    print_info_line(f"Session ID: {session_id or 'pending'}")
+    if session_title:
+        print_info_line(f"Session Title: {session_title}")
     print_info_line(f"Message History: {len(agent.messages)} messages")
     print_info_line(f"Available Tools: {len(agent.tools)} tools")
 
@@ -255,6 +268,20 @@ def print_session_info(agent: Agent, workspace_dir: Path, model: str):
     print()
     print(f"{Colors.DIM}Type {Colors.BRIGHT_GREEN}/help{Colors.DIM} for help, {Colors.BRIGHT_GREEN}/exit{Colors.DIM} to quit{Colors.RESET}")
     print()
+
+
+def print_resume_candidates(sessions: list[SessionMeta]) -> None:
+    """Print available sessions for /resume."""
+    print(f"\n{Colors.BOLD}{Colors.BRIGHT_YELLOW}Available Sessions:{Colors.RESET}")
+    print(f"{Colors.DIM}{'─' * 80}{Colors.RESET}")
+    for idx, meta in enumerate(sessions, 1):
+        log_hint = f" | log: {meta.last_log_file}" if meta.last_log_file else ""
+        print(
+            f"  {Colors.GREEN}{idx:2d}.{Colors.RESET} "
+            f"{Colors.BRIGHT_WHITE}{meta.title}{Colors.RESET} "
+            f"{Colors.DIM}({meta.message_count} msgs, updated {meta.updated_at}{log_hint}){Colors.RESET}"
+        )
+    print(f"{Colors.DIM}{'─' * 80}{Colors.RESET}")
 
 
 def print_stats(agent: Agent, session_start: datetime):
@@ -577,7 +604,13 @@ async def run_agent(workspace_dir: Path):
         # Remove placeholder if skills not enabled
         system_prompt = system_prompt.replace("{SKILLS_METADATA}", "")
 
-    # 7. Create Agent
+    # 7. Initialize session storage (lazy materialization)
+    session_store = SessionStore(workspace_dir=workspace_dir)
+    current_session_id: str | None = None
+    current_session_title = "New Session (pending)"
+    is_materialized = False
+
+    # 8. Create Agent
     agent = Agent(
         llm_client=llm_client,
         system_prompt=system_prompt,
@@ -585,15 +618,40 @@ async def run_agent(workspace_dir: Path):
         max_steps=config.agent.max_steps,
         workspace_dir=str(workspace_dir),
     )
+    # Keep logger disabled while session is pending (no real chat yet).
+    agent.logger = AgentLogger(log_dir=None)
 
-    # 8. Display welcome information
+    # Auto-resume current materialized session if available.
+    restored_session_id = session_store.get_current_session_id()
+    if restored_session_id:
+        try:
+            restored_messages = session_store.load_session_messages(restored_session_id)
+            if restored_messages:
+                agent.messages = restored_messages
+                current_session_id = restored_session_id
+                meta = session_store.get_session(restored_session_id)
+                if meta:
+                    current_session_title = meta.title
+                is_materialized = True
+                agent.logger.set_log_dir(session_store.get_session_log_dir(restored_session_id))
+                print(f"{Colors.GREEN}✅ Resumed session: {current_session_title}{Colors.RESET}")
+        except Exception as e:
+            print(f"{Colors.YELLOW}⚠️  Failed to restore last session: {e}{Colors.RESET}")
+
+    # 9. Display welcome information
     print_banner()
-    print_session_info(agent, workspace_dir, config.llm.model)
+    print_session_info(
+        agent,
+        workspace_dir,
+        config.llm.model,
+        session_id=current_session_id,
+        session_title=current_session_title,
+    )
 
-    # 9. Setup prompt_toolkit session
+    # 10. Setup prompt_toolkit session
     # Command completer
     command_completer = WordCompleter(
-        ["/help", "/clear", "/history", "/stats", "/log", "/exit", "/quit", "/q"],
+        ["/help", "/new", "/resume", "/clear", "/history", "/stats", "/log", "/exit", "/quit", "/q"],
         ignore_case=True,
         sentence=True,
     )
@@ -636,7 +694,7 @@ async def run_agent(workspace_dir: Path):
         key_bindings=kb,
     )
 
-    # 10. Interactive loop
+    # 11. Interactive loop
     while True:
         try:
             # Get user input using prompt_toolkit
@@ -666,10 +724,71 @@ async def run_agent(workspace_dir: Path):
                     print_help()
                     continue
 
+                elif command == "/new":
+                    # Switch to a new pending session without touching disk.
+                    agent.messages = [agent.messages[0]]
+                    current_session_id = None
+                    current_session_title = "New Session (pending)"
+                    is_materialized = False
+                    agent.logger.set_log_dir(None)
+                    print(f"{Colors.GREEN}✅ Switched to new pending session (lazy, not materialized yet){Colors.RESET}\n")
+                    continue
+
+                elif command == "/resume":
+                    sessions = session_store.list_sessions(limit=20)
+                    if not sessions:
+                        print(f"\n{Colors.YELLOW}No materialized sessions found. Start chatting to create one.{Colors.RESET}\n")
+                        continue
+
+                    print_resume_candidates(sessions)
+                    selection = (
+                        await session.prompt_async(
+                            [
+                                ("class:prompt", "Resume"),
+                                ("", " › Enter number (blank to cancel): "),
+                            ],
+                            multiline=False,
+                        )
+                    ).strip()
+                    if not selection:
+                        print(f"{Colors.DIM}Resume cancelled.{Colors.RESET}\n")
+                        continue
+
+                    if not selection.isdigit():
+                        print(f"{Colors.RED}❌ Invalid selection: {selection}{Colors.RESET}\n")
+                        continue
+
+                    selected_index = int(selection) - 1
+                    if selected_index < 0 or selected_index >= len(sessions):
+                        print(f"{Colors.RED}❌ Selection out of range{Colors.RESET}\n")
+                        continue
+
+                    selected_meta = sessions[selected_index]
+                    try:
+                        restored_messages = session_store.load_session_messages(selected_meta.session_id)
+                    except Exception as e:
+                        print(f"{Colors.RED}❌ Failed to load session: {e}{Colors.RESET}\n")
+                        continue
+
+                    if not restored_messages:
+                        print(f"{Colors.RED}❌ Selected session has no messages and cannot be restored{Colors.RESET}\n")
+                        continue
+
+                    agent.messages = restored_messages
+                    current_session_id = selected_meta.session_id
+                    current_session_title = selected_meta.title
+                    is_materialized = True
+                    session_store.set_current_session(selected_meta.session_id)
+                    agent.logger.set_log_dir(session_store.get_session_log_dir(selected_meta.session_id))
+                    print(f"{Colors.GREEN}✅ Resumed: {current_session_title}{Colors.RESET}\n")
+                    continue
+
                 elif command == "/clear":
                     # Clear message history but keep system prompt
                     old_count = len(agent.messages)
                     agent.messages = [agent.messages[0]]  # Keep only system message
+                    if is_materialized and current_session_id:
+                        session_store.replace_messages(current_session_id, agent.messages)
                     print(f"{Colors.GREEN}✅ Cleared {old_count - 1} messages, starting new session{Colors.RESET}\n")
                     continue
 
@@ -684,13 +803,14 @@ async def run_agent(workspace_dir: Path):
                 elif command == "/log" or command.startswith("/log "):
                     # Parse /log command
                     parts = user_input.split(maxsplit=1)
+                    current_log_dir = session_store.get_session_log_dir(current_session_id) if current_session_id else workspace_dir / ".logs"
                     if len(parts) == 1:
-                        # /log - show log directory
-                        show_log_directory(open_file_manager=True)
+                        # /log - show current session log directory
+                        show_log_directory(log_dir=current_log_dir, open_file_manager=True)
                     else:
                         # /log <filename> - read specific log file
                         filename = parts[1].strip("\"'")
-                        read_log_file(filename)
+                        read_log_file(filename, log_dir=current_log_dir)
                     continue
 
                 else:
@@ -709,6 +829,17 @@ async def run_agent(workspace_dir: Path):
                 f"\n{Colors.BRIGHT_BLUE}Agent{Colors.RESET} {Colors.DIM}›{Colors.RESET} {Colors.DIM}Thinking... (Esc to cancel){Colors.RESET}\n"
             )
             agent.add_user_message(user_input)
+
+            # Materialize pending session only when first real chat happens.
+            if not is_materialized:
+                meta = session_store.create_session(messages=agent.messages, title_hint=user_input)
+                current_session_id = meta.session_id
+                current_session_title = meta.title
+                is_materialized = True
+                agent.logger.set_log_dir(session_store.get_session_log_dir(current_session_id))
+                print(f"{Colors.GREEN}✅ Materialized session: {current_session_title}{Colors.RESET}")
+            elif current_session_id:
+                session_store.append_messages(current_session_id, [agent.messages[-1]])
 
             # Create cancellation event
             cancel_event = asyncio.Event()
@@ -768,6 +899,7 @@ async def run_agent(workspace_dir: Path):
 
             # Run agent with periodic cancellation check
             try:
+                old_message_count = len(agent.messages)
                 agent_task = asyncio.create_task(agent.run())
 
                 # Poll for cancellation while agent runs
@@ -778,6 +910,10 @@ async def run_agent(workspace_dir: Path):
 
                 # Get result
                 _ = agent_task.result()
+                if current_session_id and len(agent.messages) > old_message_count:
+                    session_store.append_messages(current_session_id, agent.messages[old_message_count:])
+                if current_session_id and agent.logger.get_log_file_path() is not None:
+                    session_store.add_log_file(current_session_id, agent.logger.get_log_file_path().name)
 
             except asyncio.CancelledError:
                 print(f"\n{Colors.BRIGHT_YELLOW}⚠️  Agent execution cancelled{Colors.RESET}")
@@ -814,10 +950,11 @@ def main():
 
     # Handle log subcommand
     if args.command == "log":
+        log_dir = Path.cwd() / ".logs"
         if args.filename:
-            read_log_file(args.filename)
+            read_log_file(args.filename, log_dir=log_dir)
         else:
-            show_log_directory(open_file_manager=True)
+            show_log_directory(log_dir=log_dir, open_file_manager=True)
         return
 
     # Determine workspace directory

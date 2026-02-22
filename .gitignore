@@ -36,6 +36,9 @@ env/
 # Workspace
 workspace/
 *.log
+.sessions/
+**/.session/
+**/.logs/
 
 # OS
 .DS_Store
